@@ -245,7 +245,37 @@ func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
 }
 
 func (dialector Dialector) DataTypeOf(field *schema.Field) string {
+	switch field.DataType {
+	case schema.Bool:
+		return "numeric"
+	case schema.Int, schema.Uint:
+		if field.AutoIncrement {
+			return "integer PRIMARY KEY AUTOINCREMENT"
+		}
+		return "integer"
+	case schema.Float:
+		return "real"
+	case schema.String:
+		return "text"
+	case schema.Time:
+		if val, ok := field.TagSettings["TYPE"]; ok {
+			return val
+		}
+		return "datetime"
+	case schema.Bytes:
+		return "blob"
+	}
 	return string(field.DataType)
+}
+
+func (dialector Dialector) SavePoint(tx *gorm.DB, name string) error {
+	tx.Exec("SAVEPOINT " + name)
+	return nil
+}
+
+func (dialector Dialector) RollbackTo(tx *gorm.DB, name string) error {
+	tx.Exec("ROLLBACK TO SAVEPOINT " + name)
+	return nil
 }
 
 func isSensitive(v interface{}) bool {
