@@ -50,7 +50,7 @@ func TestParseDDL(t *testing.T) {
 			ddl, err := parseDDL(p.sql...)
 
 			if err != nil {
-				panic(err.Error())
+				t.Fatalf("parseDDL failed: %v", err)
 			}
 
 			tests.AssertEqual(t, p.sql[0], ddl.compile())

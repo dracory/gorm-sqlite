@@ -249,10 +249,10 @@ func (dialector Dialector) DataTypeOf(field *schema.Field) string {
 }
 
 func isSensitive(v interface{}) bool {
-	if v == nil {
+	s, ok := v.(string)
+	if !ok {
 		return false
 	}
-	s := fmt.Sprintf("%v", v)
 	sensitivePatterns := []string{
 		"password", "passwd", "secret", "token", "api_key",
 		"credit_card", "ssn", "social_security",

@@ -1,6 +1,6 @@
 module github.com/dracory/gorm-sqlite
 
-go 1.25.0
+go 1.26.0
 
 require (
 	gorm.io/gorm v1.31.1

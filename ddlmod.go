@@ -14,15 +14,16 @@ import (
 )
 
 var (
-	sqliteSeparator    = "`|\"|'|\t"
-	uniqueRegexp       = regexp.MustCompile(fmt.Sprintf(`^CONSTRAINT [%v]?[\w-]+[%v]? UNIQUE (.*)$`, sqliteSeparator, sqliteSeparator))
-	indexRegexp        = regexp.MustCompile(fmt.Sprintf(`(?is)CREATE(?: UNIQUE)? INDEX [%v]?[\w\d-]+[%v]?(?s:.*?)ON (.*)$`, sqliteSeparator, sqliteSeparator))
-	tableRegexp        = regexp.MustCompile(fmt.Sprintf(`(?is)(CREATE TABLE [%v]?[\w\d-]+[%v]?)(?:\s*\((.*)\))?`, sqliteSeparator, sqliteSeparator))
-	separatorRegexp    = regexp.MustCompile(fmt.Sprintf("[%v]", sqliteSeparator))
-	columnsRegexp      = regexp.MustCompile(fmt.Sprintf(`[(,][%v]?(\w+)[%v]?`, sqliteSeparator, sqliteSeparator))
-	columnRegexp       = regexp.MustCompile(fmt.Sprintf(`^[%v]?([\w\d]+)[%v]?\s+([\w\(\)\d]+)(.*)$`, sqliteSeparator, sqliteSeparator))
-	defaultValueRegexp = regexp.MustCompile(`(?i) DEFAULT \(?(.+)?\)?( |COLLATE|GENERATED|$)`)
-	regRealDataType    = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
+	sqliteSeparator         = "`|\"|'|\t"
+	uniqueRegexp            = regexp.MustCompile(fmt.Sprintf(`^CONSTRAINT [%v]?[\w-]+[%v]? UNIQUE (.*)$`, sqliteSeparator, sqliteSeparator))
+	indexRegexp             = regexp.MustCompile(fmt.Sprintf(`(?is)CREATE(?: UNIQUE)? INDEX [%v]?[\w\d-]+[%v]?(?s:.*?)ON (.*)$`, sqliteSeparator, sqliteSeparator))
+	tableRegexp             = regexp.MustCompile(fmt.Sprintf(`(?is)(CREATE TABLE [%v]?[\w\d-]+[%v]?)(?:\s*\((.*)\))?`, sqliteSeparator, sqliteSeparator))
+	separatorRegexp         = regexp.MustCompile(fmt.Sprintf("[%v]", sqliteSeparator))
+	columnsRegexp           = regexp.MustCompile(fmt.Sprintf(`[(,][%v]?(\w+)[%v]?`, sqliteSeparator, sqliteSeparator))
+	columnRegexp            = regexp.MustCompile(fmt.Sprintf(`^[%v]?([\w\d]+)[%v]?\s+([\w\(\)\d]+)(.*)$`, sqliteSeparator, sqliteSeparator))
+	defaultValueRegexp      = regexp.MustCompile(`(?i) DEFAULT \(?(.+)?\)?( |COLLATE|GENERATED|$)`)
+	regRealDataType         = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
+	columnNameExtractRegexp = regexp.MustCompile("^[\"`']?([\\w\\d]+)[\"`']?")
 )
 
 func getAllColumns(s string) []string {
@@ -45,6 +46,9 @@ type ddl struct {
 func parseDDL(strs ...string) (*ddl, error) {
 	var result ddl
 	for _, str := range strs {
+		if len(str) > maxDDLLength {
+			return nil, fmt.Errorf("DDL string exceeds maximum allowed length (%d bytes)", maxDDLLength)
+		}
 		if sections := tableRegexp.FindStringSubmatch(str); len(sections) > 0 {
 			var (
 				ddlBody      = sections[2]
@@ -184,7 +188,15 @@ func parseDDL(strs ...string) (*ddl, error) {
 	return &result, nil
 }
 
+const maxDDLLength = 1 << 20 // 1 MB; guards against ReDoS via oversized DDL strings
+
 func parseDDLWithTimeout(strs ...string) (*ddl, error) {
+	for _, s := range strs {
+		if len(s) > maxDDLLength {
+			return nil, fmt.Errorf("DDL string exceeds maximum allowed length (%d bytes)", maxDDLLength)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -290,8 +302,7 @@ func (d *ddl) getColumns() []string {
 			continue
 		}
 
-		reg := regexp.MustCompile("^[\"`']?([\\w\\d]+)[\"`']?")
-		match := reg.FindStringSubmatch(f)
+		match := columnNameExtractRegexp.FindStringSubmatch(f)
 
 		if match != nil {
 			res = append(res, "`"+match[1]+"`")

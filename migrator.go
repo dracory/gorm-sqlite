@@ -16,7 +16,7 @@ type Migrator struct {
 	migrator.Migrator
 }
 
-func (m *Migrator) RunWithoutForeignKey(fc func() error) (err error) {
+func (m Migrator) RunWithoutForeignKey(fc func() error) (err error) {
 	var enabled int
 	m.DB.Raw("PRAGMA foreign_keys").Scan(&enabled)
 	if enabled == 1 {
@@ -195,7 +195,7 @@ func (m Migrator) CreateConstraint(value interface{}, name string) error {
 					constraintName = constraint.GetName()
 					constraintSql, constraintValues = constraint.Build()
 				} else {
-					return nil, nil, nil
+					return nil, nil, ErrConstraintsNotImplemented
 				}
 
 				ddl.addConstraint(constraintName, constraintSql)
@@ -331,16 +331,16 @@ func (m Migrator) RenameIndex(value interface{}, oldName, newName string) error 
 		return fmt.Errorf("invalid index name: %s", newName)
 	}
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		var sql string
-		if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql); err != nil {
+		var indexSQL string
+		if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&indexSQL); err != nil {
 			return err
 		}
-		if sql != "" {
+		if indexSQL != "" {
 			if err := m.DropIndex(value, oldName); err != nil {
 				return err
 			}
 			quotedNewName := fmt.Sprintf("`%s`", newName)
-			return m.DB.Exec(strings.Replace(sql, oldName, quotedNewName, 1)).Error
+			return m.DB.Exec(strings.Replace(indexSQL, oldName, quotedNewName, 1)).Error
 		}
 		return fmt.Errorf("failed to find index with name %v", oldName)
 	})
@@ -374,7 +374,7 @@ func (m Migrator) GetIndexes(value interface{}) ([]gorm.Index, error) {
 	indexes := make([]gorm.Index, 0)
 	err := m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		rst := make([]*Index, 0)
-		if err := m.DB.Debug().Raw("SELECT * FROM PRAGMA_index_list(?)", stmt.Table).Scan(&rst).Error; err != nil { // alias `PRAGMA index_list(?)`
+		if err := m.DB.Raw("SELECT * FROM PRAGMA_index_list(?)", stmt.Table).Scan(&rst).Error; err != nil { // alias `PRAGMA index_list(?)`
 			return err
 		}
 		for _, index := range rst {
@@ -412,7 +412,7 @@ func isValidIdentifier(name string) bool {
 	}
 	// SQLite identifier rules: must start with letter or underscore, followed by letters, digits, or underscores
 	// Also allow quoted identifiers (already handled by backticks in the code)
-	matched, _ := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_]*$`, name)
+	matched, _ := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_\-]*$`, name)
 	return matched
 }
 
