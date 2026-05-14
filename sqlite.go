@@ -3,10 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
-	"reflect"
 	"strconv"
-	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/callbacks"
@@ -18,56 +15,6 @@ import (
 
 // DriverName is the default driver name for SQLite.
 const DriverName = "sqlite"
-
-// SQLiteTime is a custom time type for SQLite that handles time string values
-type SQLiteTime struct {
-	time.Time
-}
-
-// Scan implements sql.Scanner
-func (t *SQLiteTime) Scan(value interface{}) error {
-	if value == nil {
-		t.Time = time.Time{}
-		return nil
-	}
-	switch v := value.(type) {
-	case []byte:
-		var err error
-		t.Time, err = time.Parse("2006-01-02 15:04:05.999999999-07:00", string(v))
-		if err != nil {
-			// Try parsing without timezone
-			t.Time, err = time.Parse("2006-01-02 15:04:05", string(v))
-			if err != nil {
-				// Try parsing RFC3339
-				t.Time, err = time.Parse(time.RFC3339, string(v))
-				if err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	case string:
-		var err error
-		t.Time, err = time.Parse("2006-01-02 15:04:05.999999999-07:00", v)
-		if err != nil {
-			t.Time, err = time.Parse("2006-01-02 15:04:05", v)
-			if err != nil {
-				t.Time, err = time.Parse(time.RFC3339, v)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	default:
-		return nil
-	}
-}
-
-// Value implements driver.Valuer
-func (t SQLiteTime) Value() (driver.Value, error) {
-	return t.Time, nil
-}
 
 type Dialector struct {
 	DriverName string
@@ -98,7 +45,6 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ConnPool = conn
 	}
 
-	// Register time scanner for SQLite
 	db.Dialector = dialector
 
 	var version string
@@ -122,30 +68,6 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	for k, v := range dialector.ClauseBuilders() {
 		db.ClauseBuilders[k] = v
 	}
-
-	// Register time scanner callback
-	db.Callback().Query().Before("gorm:query").Register("sqlite:time_scanner", func(db *gorm.DB) {
-		if db.Statement.Dest != nil {
-			destValue := reflect.ValueOf(db.Statement.Dest)
-			if destValue.Kind() == reflect.Ptr {
-				destValue = destValue.Elem()
-			}
-			if destValue.Kind() == reflect.Struct {
-				for i := 0; i < destValue.NumField(); i++ {
-					field := destValue.Field(i)
-					if field.Type() == reflect.TypeOf(time.Time{}) && field.CanSet() {
-						if strVal, ok := field.Interface().(string); ok {
-							if t, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", strVal); err == nil {
-								field.Set(reflect.ValueOf(t))
-							} else if t, err := time.Parse("2006-01-02 15:04:05", strVal); err == nil {
-								field.Set(reflect.ValueOf(t))
-							}
-						}
-					}
-				}
-			}
-		}
-	})
 
 	return
 }
