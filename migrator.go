@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gorm.io/gorm"
@@ -15,15 +16,23 @@ type Migrator struct {
 	migrator.Migrator
 }
 
-func (m *Migrator) RunWithoutForeignKey(fc func() error) error {
+func (m *Migrator) RunWithoutForeignKey(fc func() error) (err error) {
 	var enabled int
 	m.DB.Raw("PRAGMA foreign_keys").Scan(&enabled)
 	if enabled == 1 {
 		m.DB.Exec("PRAGMA foreign_keys = OFF")
-		defer m.DB.Exec("PRAGMA foreign_keys = ON")
+		defer func() {
+			if restoreErr := m.DB.Exec("PRAGMA foreign_keys = ON").Error; restoreErr != nil {
+				// Log the error and/or combine with function error
+				if err == nil {
+					err = fmt.Errorf("failed to restore foreign keys: %w", restoreErr)
+				}
+			}
+		}()
 	}
 
-	return fc()
+	err = fc()
+	return err
 }
 
 func (m Migrator) HasTable(value interface{}) bool {
@@ -118,7 +127,7 @@ func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 			return err
 		}
 
-		if sqlDDL, err = parseDDL(sqls...); err != nil {
+		if sqlDDL, err = parseDDLWithTimeout(sqls...); err != nil {
 			return err
 		}
 
@@ -127,7 +136,12 @@ func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 			return err
 		}
 		defer func() {
-			err = rows.Close()
+			if closeErr := rows.Close(); closeErr != nil {
+				// Log the close error but don't override existing error
+				if err == nil {
+					err = closeErr
+				}
+			}
 		}()
 
 		var rawColumnTypes []*sql.ColumnType
@@ -226,7 +240,9 @@ func (m Migrator) HasConstraint(value interface{}, name string) bool {
 
 func (m Migrator) CurrentDatabase() (name string) {
 	var null interface{}
-	m.DB.Raw("PRAGMA database_list").Row().Scan(&null, &name, &null)
+	if err := m.DB.Raw("PRAGMA database_list").Row().Scan(&null, &name, &null); err != nil {
+		return ""
+	}
 	return
 }
 
@@ -238,11 +254,15 @@ func (m Migrator) BuildIndexOptions(opts []schema.IndexOption, stmt *gorm.Statem
 		}
 
 		if opt.Collate != "" {
-			str += " COLLATE " + opt.Collate
+			if isValidIdentifier(opt.Collate) {
+				str += " COLLATE " + opt.Collate
+			}
 		}
 
 		if opt.Sort != "" {
-			str += " " + opt.Sort
+			if opt.Sort == "ASC" || opt.Sort == "DESC" {
+				str += " " + opt.Sort
+			}
 		}
 		results = append(results, clause.Expr{SQL: str})
 	}
@@ -258,16 +278,25 @@ func (m Migrator) CreateIndex(value interface{}, name string) error {
 
 				createIndexSQL := "CREATE "
 				if idx.Class != "" {
+					if !isValidIdentifier(idx.Class) {
+						return fmt.Errorf("invalid index class: %s", idx.Class)
+					}
 					createIndexSQL += idx.Class + " "
 				}
 				createIndexSQL += "INDEX ?"
 
 				if idx.Type != "" {
+					if !isValidIdentifier(idx.Type) {
+						return fmt.Errorf("invalid index type: %s", idx.Type)
+					}
 					createIndexSQL += " USING " + idx.Type
 				}
 				createIndexSQL += " ON ??"
 
 				if idx.Where != "" {
+					if strings.Contains(idx.Where, ";") {
+						return fmt.Errorf("invalid WHERE clause in index: contains statement terminator")
+					}
 					createIndexSQL += " WHERE " + idx.Where
 				}
 
@@ -298,14 +327,20 @@ func (m Migrator) HasIndex(value interface{}, name string) bool {
 }
 
 func (m Migrator) RenameIndex(value interface{}, oldName, newName string) error {
+	if !isValidIdentifier(newName) {
+		return fmt.Errorf("invalid index name: %s", newName)
+	}
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		var sql string
-		m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql)
+		if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql); err != nil {
+			return err
+		}
 		if sql != "" {
 			if err := m.DropIndex(value, oldName); err != nil {
 				return err
 			}
-			return m.DB.Exec(strings.Replace(sql, oldName, newName, 1)).Error
+			quotedNewName := fmt.Sprintf("`%s`", newName)
+			return m.DB.Exec(strings.Replace(sql, oldName, quotedNewName, 1)).Error
 		}
 		return fmt.Errorf("failed to find index with name %v", oldName)
 	})
@@ -365,12 +400,20 @@ func (m Migrator) GetIndexes(value interface{}) ([]gorm.Index, error) {
 
 func (m Migrator) getRawDDL(table string) (string, error) {
 	var createSQL string
-	m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "table", table, table).Row().Scan(&createSQL)
-
-	if m.DB.Error != nil {
-		return "", m.DB.Error
+	if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "table", table, table).Row().Scan(&createSQL); err != nil {
+		return "", err
 	}
 	return createSQL, nil
+}
+
+func isValidIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	// SQLite identifier rules: must start with letter or underscore, followed by letters, digits, or underscores
+	// Also allow quoted identifiers (already handled by backticks in the code)
+	matched, _ := regexp.MatchString(`^[a-zA-Z_][a-zA-Z0-9_]*$`, name)
+	return matched
 }
 
 func (m Migrator) recreateTable(
@@ -383,12 +426,17 @@ func (m Migrator) recreateTable(
 			table = *tablePtr
 		}
 
+		// Validate table name
+		if !isValidIdentifier(table) {
+			return fmt.Errorf("invalid table name: %s", table)
+		}
+
 		rawDDL, err := m.getRawDDL(table)
 		if err != nil {
 			return err
 		}
 
-		originDDL, err := parseDDL(rawDDL)
+		originDDL, err := parseDDLWithTimeout(rawDDL)
 		if err != nil {
 			return err
 		}

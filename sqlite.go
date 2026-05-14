@@ -3,7 +3,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"net/url"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/callbacks"
@@ -15,6 +20,29 @@ import (
 
 // DriverName is the default driver name for SQLite.
 const DriverName = "sqlite"
+
+func validateDSN(dsn string) error {
+	// Allow in-memory databases
+	if dsn == ":memory:" {
+		return nil
+	}
+
+	decoded, err := url.PathUnescape(dsn)
+	if err != nil {
+		return fmt.Errorf("invalid DSN encoding: %w", err)
+	}
+
+	// Check for path traversal attempts
+	if strings.Contains(decoded, "..") {
+		return fmt.Errorf("DSN contains path traversal sequence")
+	}
+
+	if filepath.IsAbs(decoded) {
+		return fmt.Errorf("absolute paths are not allowed in DSN")
+	}
+
+	return nil
+}
 
 type Dialector struct {
 	DriverName string
@@ -38,10 +66,17 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	if dialector.Conn != nil {
 		db.ConnPool = dialector.Conn
 	} else {
+		// Validate DSN before opening connection
+		if err := validateDSN(dialector.DSN); err != nil {
+			return fmt.Errorf("invalid DSN: %w", err)
+		}
 		conn, err := sql.Open(dialector.DriverName, dialector.DSN)
 		if err != nil {
 			return err
 		}
+		conn.SetMaxOpenConns(1)
+		conn.SetMaxIdleConns(1)
+		conn.SetConnMaxLifetime(time.Hour)
 		db.ConnPool = conn
 	}
 
@@ -52,7 +87,11 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		return err
 	}
 	// https://www.sqlite.org/releaselog/3_35_0.html
-	if compareVersion(version, "3.35.0") >= 0 {
+	cmp, err := compareVersion(version, "3.35.0")
+	if err != nil {
+		return err
+	}
+	if cmp >= 0 {
 		callbacks.RegisterDefaultCallbacks(db, &callbacks.Config{
 			CreateClauses:        []string{"INSERT", "VALUES", "ON CONFLICT", "RETURNING"},
 			UpdateClauses:        []string{"UPDATE", "SET", "FROM", "WHERE", "RETURNING"},
@@ -143,13 +182,20 @@ func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement,
 }
 
 func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
+	// Validate length to prevent memory issues
+	const maxIdentifierLength = 1000 // SQLite default limit
+	if len(str) > maxIdentifierLength {
+		writer.WriteString("[INVALID_IDENTIFIER]")
+		return
+	}
+
 	var (
 		underQuoted, selfQuoted bool
 		continuousBacktick      int8
 		shiftDelimiter          int8
 	)
 
-	for _, v := range []byte(str) {
+	for _, v := range str {
 		switch v {
 		case '`':
 			continuousBacktick++
@@ -164,7 +210,7 @@ func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
 				continuousBacktick = 0
 				writer.WriteString("`")
 			}
-			writer.WriteByte(v)
+			writer.WriteByte(byte(v))
 			continue
 		default:
 			if shiftDelimiter-continuousBacktick <= 0 && !underQuoted {
@@ -179,7 +225,7 @@ func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
 				writer.WriteString("``")
 			}
 
-			writer.WriteByte(v)
+			writer.WriteString(string(v))
 		}
 
 		if continuousBacktick > 0 {
@@ -202,31 +248,64 @@ func (dialector Dialector) DataTypeOf(field *schema.Field) string {
 	return string(field.DataType)
 }
 
-func (dialector Dialector) Explain(sql string, vars ...interface{}) string {
-	return logger.ExplainSQL(sql, nil, `"`, vars...)
+func isSensitive(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	s := fmt.Sprintf("%v", v)
+	sensitivePatterns := []string{
+		"password", "passwd", "secret", "token", "api_key",
+		"credit_card", "ssn", "social_security",
+	}
+	lower := strings.ToLower(s)
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
-func compareVersion(version1, version2 string) int {
+func (dialector Dialector) Explain(sql string, vars ...interface{}) string {
+	// Redact sensitive parameters
+	redactedVars := make([]interface{}, len(vars))
+	for i, v := range vars {
+		if isSensitive(v) {
+			redactedVars[i] = "[REDACTED]"
+		} else {
+			redactedVars[i] = v
+		}
+	}
+	return logger.ExplainSQL(sql, nil, `"`, redactedVars...)
+}
+
+func compareVersion(version1, version2 string) (int, error) {
 	n, m := len(version1), len(version2)
 	i, j := 0, 0
 	for i < n || j < m {
 		var x, y int
 		for i < n && version1[i] != '.' {
+			if version1[i] < '0' || version1[i] > '9' {
+				return 0, fmt.Errorf("invalid version string: %q", version1)
+			}
 			x = x*10 + int(version1[i]-'0')
 			i++
 		}
 		i++ // skip dot
 		for j < m && version2[j] != '.' {
+			if version2[j] < '0' || version2[j] > '9' {
+				return 0, fmt.Errorf("invalid version string: %q", version2)
+			}
 			y = y*10 + int(version2[j]-'0')
 			j++
 		}
 		j++ // skip dot
 		if x > y {
-			return 1
+			return 1, nil
 		}
 		if x < y {
-			return -1
+			return -1, nil
 		}
 	}
-	return 0
+	return 0, nil
 }

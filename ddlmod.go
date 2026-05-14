@@ -1,12 +1,14 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gorm.io/gorm/migrator"
 )
@@ -182,6 +184,29 @@ func parseDDL(strs ...string) (*ddl, error) {
 	return &result, nil
 }
 
+func parseDDLWithTimeout(strs ...string) (*ddl, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		ddl *ddl
+		err error
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		d, err := parseDDL(strs...)
+		ch <- result{d, err}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.ddl, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("DDL parsing timeout")
+	}
+}
+
 func (d *ddl) clone() *ddl {
 	copied := new(ddl)
 	*copied = *d
@@ -208,7 +233,7 @@ func (d *ddl) renameTable(dst, src string) error {
 		return err
 	}
 
-	replaced := tableReg.ReplaceAllString(d.head, fmt.Sprintf(" `%s` ", dst))
+	replaced := tableReg.ReplaceAllLiteralString(d.head, fmt.Sprintf(" `%s` ", dst))
 	if replaced == d.head {
 		return fmt.Errorf("failed to look up tablename `%s` from DDL head '%s'", src, d.head)
 	}
