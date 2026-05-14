@@ -1,4 +1,6 @@
-# gorm-sqlite
+# GORM SQLite Driver (Pure Go)
+
+[![Tests](https://github.com/dracory/gorm-sqlite/actions/workflows/tests.yml/badge.svg)](https://github.com/dracory/gorm-sqlite/actions/workflows/tests.yml)
 
 A CGO-free SQLite dialector for [GORM](https://gorm.io), built on top of [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite). No C compiler required.
 
